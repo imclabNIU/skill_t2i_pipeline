@@ -1,0 +1,99 @@
+[
+  {
+    "name": "Mikkoani Illustration",
+    "repo": "mikkoph/mikkoani-qwen-image-2.1",
+    "base_model": "Qwen-Image-2.1",
+    "description": "hand-drawn expressionist illustration with energetic brush strokes, freehand drawing, expressive linework and fashion illustration aesthetics",
+    "keywords": [
+      "hand-drawn illustration",
+      "expressionism",
+      "expressive brush strokes",
+      "freehand drawing",
+      "fashion illustration",
+      "expressive line art",
+      "sketch style",
+      "stylized illustration"
+    ],
+    "trigger": "@mikkoani",
+    "weight": 0.3,
+    "weight_name": "qi21-mikkoani.safetensors"
+  },
+  {
+    "name": "Genshin TCG 2D",
+    "repo": "wesjos/Qwen-Image2.1-Genshin-2D-Lora",
+    "base_model": "Qwen-Image-2.1",
+    "description": "bright and colorful Japanese game anime illustration with clean cel shading, polished flat coloring, colored linework and detailed character rendering",
+    "keywords": [
+      "vibrant colors",
+      "bright color palette",
+      "cel shading",
+      "flat coloring",
+      "2D character illustration",
+      "anime game art",
+      "Japanese game anime",
+      "colored linework",
+      "polished illustration"
+    ],
+    "trigger": "genshintcg_style",
+    "weight": 0.3,
+    "weight_name": "genshintcg_style_st3500.safetensors"
+  },
+  {
+    "name": "ZZZ Style",
+    "repo": "wesjos/Qwen-Image2.1-ZenlessZoneZero-Lora",
+    "base_model": "Qwen-Image-2.1",
+    "description": "modern anime character design with stylized game illustration, expressive linework, cel shading and an energetic urban visual style",
+    "keywords": [
+      "modern anime",
+      "character design",
+      "anime character illustration",
+      "stylized game illustration",
+      "urban anime style",
+      "cel shading",
+      "expressive line art",
+      "dynamic anime composition"
+    ],
+    "trigger": "zenlesszonezero",
+    "weight": 0.3,
+    "weight_name": "zzz_style_v1.6_3500.safetensors"
+  },
+  {
+    "name": "Mikkoph Futuristic Fashion",
+    "repo": "mikkoph/mikkoph-qwen-image-2.1",
+    "base_model": "Qwen-Image-2.1",
+    "description": "avant-garde futuristic fashion style with bold neon colors, high saturation, strong color contrast, experimental styling and futuristic urban aesthetics",
+    "keywords": [
+      "neon colors",
+      "futuristic aesthetic",
+      "avant-garde",
+      "high saturation",
+      "bold color contrast",
+      "urban futuristic",
+      "experimental fashion",
+      "vibrant neon palette",
+      "futuristic fashion"
+    ],
+    "trigger": "@mikkoph",
+    "weight": 0.3
+  },
+  {
+    "name": "Film Stills",
+    "repo": "Danrisi/filmstills_qwen2.1",
+    "base_model": "Qwen-Image-2.1",
+    "description": "realistic cinematic film still aesthetic with 35mm movie photography, cinematic composition, atmospheric lighting, film color grading, deep shadows and photographic realism",
+    "keywords": [
+      "cinematic film still",
+      "35mm film still",
+      "movie still",
+      "cinematic photography",
+      "realistic photography",
+      "cinematic composition",
+      "cinematic lighting",
+      "film color grading",
+      "atmospheric lighting",
+      "photographic realism"
+    ],
+    "trigger": "film still",
+    "weight": 0.3
+  }
+]
