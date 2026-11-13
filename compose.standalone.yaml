@@ -1,0 +1,5 @@
+# Host mounts belong only to standalone Docker, not the platform source package.
+services:
+  worker:
+    volumes:
+      - ${SKILL_MODELS_DIR:-./models}:/data/models:ro

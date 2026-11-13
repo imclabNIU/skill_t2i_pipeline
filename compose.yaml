@@ -1,0 +1,72 @@
+services:
+  coordinator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: coordinator
+    environment:
+      ROLE: coordinator
+      MODE: standalone
+      PORT: "7860"
+      PATH_BASE: ${PATH_BASE:-/}
+      OUTPUT_DIR: /data/output
+      WORKER_URL_TEMPLATE: http://worker:8188
+      WORKER_COUNT: "1"
+    ports: ["7860:7860"]
+    volumes:
+      - output:/data/output
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    environment:
+      ROLE: worker
+      MODE: standalone
+      PORT: "8188"
+      OUTPUT_DIR: /data/output
+      HF_HOME: /data/cache
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-1}
+      IMAGE_MODEL: ${IMAGE_MODEL:-/data/models/base-models/Qwen-Image-2.1}
+      LLM_MODEL: ${LLM_MODEL:-/data/models/llm/Qwen2.5-1.5B-Instruct}
+      EMBED_MODEL: ${EMBED_MODEL:-/data/models/embedding/paraphrase-multilingual-MiniLM-L12-v2}
+      LORA_LIBRARY: ${LORA_LIBRARY:-/app/lora_library.json}
+      LORA_BASE_MODEL: ${LORA_BASE_MODEL:-auto}
+      WIDTH: ${WIDTH:-1024}
+      HEIGHT: ${HEIGHT:-1024}
+      STEPS: ${STEPS:-40}
+      SEED: ${SEED:-42}
+      MAX_LORAS: ${MAX_LORAS:-2}
+      SIMILARITY_THRESHOLD: ${SIMILARITY_THRESHOLD:-0.45}
+      DEFAULT_LORA_WEIGHT: ${DEFAULT_LORA_WEIGHT:-0.3}
+      TRUE_CFG_SCALE: ${TRUE_CFG_SCALE:-1.0}
+      QUANTIZATION: ${QUANTIZATION:-4bit}
+      OFFLOAD_MODE: ${OFFLOAD_MODE:-none}
+      GPU_MEMORY_GIB: ${GPU_MEMORY_GIB:-auto}
+      VAE_TILING: ${VAE_TILING:-1}
+    expose: ["8188"]
+    volumes:
+      - models:/data/models:ro
+      - output:/data/output
+      - cache:/data/cache
+    healthcheck:
+      test: [CMD, python3, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8188/readyz', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+volumes:
+  models: {}
+  output: {}
+  cache: {}

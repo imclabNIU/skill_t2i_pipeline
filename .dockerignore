@@ -1,0 +1,9 @@
+results
+models
+.env
+.env.*
+compose.*.yaml
+test_*
+__pycache__
+*.pyc
+dist

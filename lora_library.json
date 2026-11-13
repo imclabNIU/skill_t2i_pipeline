@@ -1,7 +1,7 @@
 [
   {
     "name": "Mikkoani Illustration",
-    "repo": "mikkoph/mikkoani-qwen-image-2.1",
+    "repo": "/data/models/loras/mikkoani",
     "base_model": "Qwen-Image-2.1",
     "description": "hand-drawn expressionist illustration with energetic brush strokes, freehand drawing, expressive linework and fashion illustration aesthetics",
     "keywords": [
@@ -20,7 +20,7 @@
   },
   {
     "name": "Genshin TCG 2D",
-    "repo": "wesjos/Qwen-Image2.1-Genshin-2D-Lora",
+    "repo": "/data/models/loras/genshin-2d",
     "base_model": "Qwen-Image-2.1",
     "description": "bright and colorful Japanese game anime illustration with clean cel shading, polished flat coloring, colored linework and detailed character rendering",
     "keywords": [
@@ -40,7 +40,7 @@
   },
   {
     "name": "ZZZ Style",
-    "repo": "wesjos/Qwen-Image2.1-ZenlessZoneZero-Lora",
+    "repo": "/data/models/loras/zenless-zone-zero",
     "base_model": "Qwen-Image-2.1",
     "description": "modern anime character design with stylized game illustration, expressive linework, cel shading and an energetic urban visual style",
     "keywords": [
@@ -59,7 +59,7 @@
   },
   {
     "name": "Mikkoph Futuristic Fashion",
-    "repo": "mikkoph/mikkoph-qwen-image-2.1",
+    "repo": "/data/models/loras/mikkoph",
     "base_model": "Qwen-Image-2.1",
     "description": "avant-garde futuristic fashion style with bold neon colors, high saturation, strong color contrast, experimental styling and futuristic urban aesthetics",
     "keywords": [
@@ -74,11 +74,12 @@
       "futuristic fashion"
     ],
     "trigger": "@mikkoph",
-    "weight": 0.3
+    "weight": 0.3,
+    "weight_name": "qi21-mikkoph.safetensors"
   },
   {
     "name": "Film Stills",
-    "repo": "Danrisi/filmstills_qwen2.1",
+    "repo": "/data/models/loras/filmstills",
     "base_model": "Qwen-Image-2.1",
     "description": "realistic cinematic film still aesthetic with 35mm movie photography, cinematic composition, atmospheric lighting, film color grading, deep shadows and photographic realism",
     "keywords": [
@@ -94,6 +95,7 @@
       "photographic realism"
     ],
     "trigger": "film still",
-    "weight": 0.3
+    "weight": 0.3,
+    "weight_name": "filmstills_qwen21.safetensors"
   }
 ]

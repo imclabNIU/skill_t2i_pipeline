@@ -1,5 +1,7 @@
 # Skill-Enhanced Text-to-Image Pipeline
 
+## 專案介紹
+
 這是一套整合 **Skill LLM、LoRA Retrieval 與 Qwen-Image 2.1** 的文字生成圖片流程。
 
 主要流程：
@@ -14,317 +16,90 @@ User Prompt
 → Generated Image
 ```
 
----
+提供網頁 UI、API 與 FIFO queue，由 coordinator 接收請求，GPU worker 依序執行；worker 忙碌時，新請求會保留排隊。
 
-## 檔案說明
+worker 啟動後載入模型並持續重用；預設不在生成完成後卸載 GPU 模型。對話式介面保留描述、送出時間與圖片歷史，重新整理後會從輸出儲存載入。
 
-- `skill_t2i.py`：主程式
-- `lora_library.json`：LoRA 資料與檢索資訊
-- `prompts.txt`：範例 Prompt，可直接修改
-- `requirements.txt`：測試成功環境的完整套件版本
+## Docker 用法
 
----
-
-## 執行環境
-
-測試成功環境：
+需要 Linux、NVIDIA GPU、相容驅動、Docker Compose 與 NVIDIA Container Toolkit。將下載好的模型放入本目錄的 `models/`，也可先啟動服務再放入模型：
 
 ```text
-Windows 11 + WSL2
-Ubuntu 24.04
-Python 3.12
-NVIDIA RTX 5070 Ti 16GB
-PyTorch 2.11.0+cu128
+models/
+├── base-models/Qwen-Image-2.1/
+├── llm/Qwen2.5-1.5B-Instruct/
+├── embedding/paraphrase-multilingual-MiniLM-L12-v2/
+└── loras/
+    ├── mikkoani/qi21-mikkoani.safetensors
+    ├── genshin-2d/genshintcg_style_st3500.safetensors
+    ├── zenless-zone-zero/zzz_style_v1.6_3500.safetensors
+    ├── mikkoph/qi21-mikkoph.safetensors
+    └── filmstills/filmstills_qwen21.safetensors
 ```
 
-不需要使用完全相同的硬體環境，只要 NVIDIA Driver、PyTorch 與 CUDA 相容即可。
-
-PyTorch 建議依照自己的 GPU 與系統環境選擇適合的 CUDA 版本。
-
----
-
-## 必要套件
-
-建議安裝：
+在本目錄執行；已有 `.env` 時直接編輯：
 
 ```bash
-pip install torch torchvision
-pip install transformers diffusers accelerate
-pip install sentence-transformers
-pip install peft safetensors pillow
+cp .env.example .env
+docker compose -f compose.yaml -f compose.standalone.yaml config --quiet
+docker compose -f compose.yaml -f compose.standalone.yaml up -d --build
 ```
 
-若需要重現測試環境，可參考：
+開啟 <http://localhost:7860/>。模型目錄唯讀掛載至 `/data/models`，輸出與快取保存於 named volumes；預設離線載入，不重新下載模型。
 
-```text
-requirements.txt
-```
+缺少模型時，介面會列出模型名稱與缺少的檔案，描述可先送出排隊；模型檔案完整後會自動開始載入。更換已載入的基礎模型或量化設定須重新啟動 worker；外部 LoRA 清單仍可原子更新。
 
----
+設定說明見 [.env.example](.env.example)。可調整模型路徑、LoRA 清單、量化、顯存預算與圖片參數；宿主模型目錄不同時設定 `SKILL_MODELS_DIR`。預設使用 `4bit`、`OFFLOAD_MODE=none`、`GPU_MEMORY_GIB=auto` 與 VAE tiling；顯存預算限制的是 PyTorch allocator，實際需求依模型與解析度而異。
 
-## 模型準備
-
-以下模型為目前主程式的**預設設定**，可依需求更換。
-
-### Skill LLM
-
-預設：
-
-```text
-Qwen/Qwen2.5-1.5B-Instruct
-```
-
-設定位置：
-
-```python
-LLM_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
-```
-
-第一次執行時會由 Hugging Face 自動下載並快取。
-
-用途：
-
-- 改寫原始 Prompt
-- 保留原始語意
-- 產生 `rewritten_prompt`
-- 擷取 `style_keywords`
-
-若要更換其他 LLM，可修改 `LLM_MODEL`，並依新模型需求調整 `SkillLLM`。
-
----
-
-### Embedding Model
-
-預設：
-
-```text
-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-```
-
-設定位置：
-
-```python
-EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-```
-
-用途：
-
-- 將 `style_keywords` 與 LoRA 描述轉成 embedding
-- 使用 cosine similarity 做 LoRA Retrieval
-
-可更換其他 Embedding Model；若模型介面不同，需同步調整 `LoRARetriever`。
-
----
-
-### Image Model
-
-預設：
-
-```text
-Qwen/Qwen-Image-2.1
-```
-
-建議先從 Hugging Face 下載至本機，再修改：
-
-```python
-IMAGE_MODEL = "/your/path/Qwen-Image-2.1"
-```
-
-目前程式使用：
-
-```python
-local_files_only=True
-```
-
-因此預設情況下，模型需先存在本機。
-
-若更換其他影像生成模型，主要需調整 `ImageGenerator` 的模型載入、推論參數及 LoRA 載入方式。
-
----
-
-## 使用方式
-
-### 直接輸入 Prompt
-
-執行：
+查看日誌及停止服務：
 
 ```bash
-python skill_t2i.py
+docker compose -f compose.yaml -f compose.standalone.yaml logs -f worker
+docker compose -f compose.yaml -f compose.standalone.yaml down
 ```
 
-程式會讓使用者輸入一筆或多筆 Prompt，輸入空白行後開始執行。
+停止前先等待工作完成；保留 volumes 可在下次啟動時沿用輸出及佇列。此啟動方式沒有登入機制，請在受控網路使用。
 
----
+## 本機直接執行
 
-### 使用 Prompt File
-
-提供的：
-
-```text
-prompts.txt
-```
-
-為示範 Prompt，可直接修改。
-
-每一行代表一筆 Prompt。
-
-執行：
+需要 Linux、Python 3.12 與支援 CUDA 12.8 的 NVIDIA 驅動／GPU。沿用上述 `models/` 目錄，在本目錄建立虛擬環境並安裝依賴：
 
 ```bash
-python skill_t2i.py --prompt-file prompts.txt
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements.txt
 ```
 
----
+內附 LoRA 清單使用容器路徑。先產生使用本機絕對路徑的清單：
 
-## 預設參數
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
 
-| Parameter | Default |
-|---|---:|
-| Resolution | 1024 × 1024 |
-| Steps | 40 |
-| Seed | 42 |
-| LoRA Weight | 0.3 |
-| Similarity Threshold | 0.45 |
-| Top-K LoRA | 2 |
-| true_cfg_scale | 1.0 |
-
----
-
-## 模組分工
-
-### `SkillLLM`
-
-負責：
-
-```text
-User Prompt
-→ rewritten_prompt
-→ style_keywords
+models = Path('models').resolve()
+library = json.loads(Path('lora_library.json').read_text())
+for item in library:
+    item['repo'] = str(models / 'loras' / Path(item['repo']).name)
+Path('lora_library.local.json').write_text(json.dumps(library, ensure_ascii=False, indent=2))
+PY
 ```
 
-若要更換 LLM、修改 System Prompt 或 Prompt 改寫規則，主要修改此模組。
+在 `prompts.txt` 每行填入一筆提示詞，執行：
 
----
-
-### `LoRARetriever`
-
-負責：
-
-```text
-style_keywords
-→ Embedding
-→ Cosine Similarity
-→ Threshold
-→ Top-K
-→ Selected LoRA
+```bash
+HF_HUB_OFFLINE=1 python skill_t2i.py \
+  --prompt-file prompts.txt \
+  --output-dir results \
+  --llm-model ./models/llm/Qwen2.5-1.5B-Instruct \
+  --embed-model ./models/embedding/paraphrase-multilingual-MiniLM-L12-v2 \
+  --image-model ./models/base-models/Qwen-Image-2.1 \
+  --lora-library ./lora_library.local.json \
+  --quantization 4bit \
+  --offload-mode none \
+  --gpu-memory-gib auto \
+  --vae-tiling
 ```
 
-目前預設：
-
-```text
-Threshold = 0.45
-Top-K = 2
-```
-
-若沒有 LoRA 通過 Threshold，則使用 Prompt-only mode。
-
-若要更換 Embedding Model、Similarity 計算方式、Threshold 或 Top-K，主要修改此模組。
-
----
-
-### `build_final_prompt()`
-
-負責整合：
-
-```text
-rewritten_prompt
-+ style_keywords
-+ LoRA trigger
-→ final_prompt
-```
-
-若要修改 Prompt 組合方式，修改此函式即可。
-
----
-
-### `ImageGenerator`
-
-負責：
-
-- 載入 Qwen-Image 2.1
-- CPU Offload
-- 載入 LoRA
-- 設定 LoRA Weight
-- 圖片生成
-- 圖片儲存
-
-若要更換影像生成模型，主要修改此模組。
-
-注意：不同 Base Model 的 LoRA 通常不能直接共用。
-
----
-
-## LoRA Library
-
-LoRA 設定存放於：
-
-```text
-lora_library.json
-```
-
-主要欄位格式：
-
-```json
-{
-  "name": "Example Style",
-  "repo": "example/repository",
-  "weight_name": "example.safetensors",
-  "trigger": "example_style",
-  "description": "Example visual style",
-  "keywords": [
-    "anime illustration",
-    "vibrant colors"
-  ],
-  "base_model": "Qwen-Image-2.1",
-  "weight": 0.3
-}
-```
-
-若要新增 LoRA，只需新增對應項目至 `lora_library.json`。
-
----
-
-## 輸出結果
-
-預設輸出：
-
-```text
-results/
-├── result_01_original.png
-├── result_01_enhanced.png
-├── result.json
-└── result_timing.txt
-```
-
-其中：
-
-- `Original Image`：使用原始 Prompt
-- `Enhanced Image`：使用改寫後 Prompt、Style Keywords 與選中的 LoRA
-- 兩張圖片使用相同 Seed，方便比較
-
----
-
-## 修改位置快速對照
-
-| 想修改的功能 | 主要修改位置 |
-|---|---|
-| 更換 Skill LLM | `SkillLLM` |
-| 修改 Prompt 改寫規則 | `SkillLLM.analyze()` |
-| 更換 Embedding Model | `EMBED_MODEL` / `LoRARetriever` |
-| 修改 Threshold / Top-K | `LoRARetriever` |
-| 新增或修改 LoRA | `lora_library.json` |
-| 修改 Prompt 組合方式 | `build_final_prompt()` |
-| 更換 Image Model | `ImageGenerator` |
-| 修改輸入方式 | `input_prompts()` / `load_prompts_from_file()` |
-
-整體流程採模組化設計，因此若需要替換 LLM、Embedding Model、LoRA Library 或 Image Generation Model，通常只需修改對應模組即可。
+圖片與 `result.json` 會寫入 `results/`。可用 `--width`、`--height`、`--steps` 與 `--seed` 調整生圖；其他參數執行 `python skill_t2i.py --help` 查看。換模型時調整模型路徑與相容的 LoRA 清單，影像模型須為含 `model_index.json` 的完整 Diffusers 目錄。

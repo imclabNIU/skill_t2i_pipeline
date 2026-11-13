@@ -4,32 +4,58 @@ import json
 import gc
 import time
 import argparse
+import math
+import inspect
 from pathlib import Path
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import transformers
+import diffusers
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig as TransformersBitsAndBytesConfig
 from sentence_transformers import SentenceTransformer, util
-from diffusers import QwenImage21Pipeline
+from diffusers import AutoPipelineForText2Image, BitsAndBytesConfig as DiffusersBitsAndBytesConfig
 
 
 # ============================================================
 # Configuration
 # ============================================================
 
-LLM_MODEL = "Qwen/Qwen2.5-1.5B-Instruct"
+LLM_MODEL = os.environ.get("LLM_MODEL", "Qwen/Qwen2.5-1.5B-Instruct")
 
-# WSL
-IMAGE_MODEL = "/mnt/d/models/Qwen-Image-2.1"
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL", "/data/models/base-models/Qwen-Image-2.1")
 
-# Windows 原生 Python 可改成：
-# IMAGE_MODEL = r"D:\\models\\Qwen-Image-2.1"
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+LORA_LIBRARY = os.environ.get("LORA_LIBRARY", "./lora_library.json")
 
-EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-LORA_LIBRARY = "./lora_library.json"
+MAX_LORAS = int(os.environ.get("MAX_LORAS", "2"))
+SIMILARITY_THRESHOLD = float(os.environ.get("SIMILARITY_THRESHOLD", "0.45"))
+DEFAULT_LORA_WEIGHT = float(os.environ.get("DEFAULT_LORA_WEIGHT", "0.3"))
+LOCAL_FILES_ONLY = os.environ.get("HF_HUB_OFFLINE", "0").upper() in ("1", "ON", "YES", "TRUE")
 
-MAX_LORAS = 2
-SIMILARITY_THRESHOLD = 0.45
-DEFAULT_LORA_WEIGHT = 0.3
+
+def quantization_config(config_type, mode):
+    if mode == "none":
+        return None
+    if mode == "8bit":
+        return config_type(load_in_8bit=True)
+    if mode == "4bit":
+        return config_type(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                           bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
+    raise ValueError("Quantization must be none, 8bit or 4bit")
+
+
+def configure_gpu_memory(requested):
+    if not torch.cuda.is_available():
+        raise RuntimeError("This pipeline requires a CUDA GPU")
+    device = torch.cuda.current_device()
+    total = torch.cuda.get_device_properties(device).total_memory
+    limit = int(total * 0.9) if requested == "auto" else int(requested * 1024**3)
+    if limit > total:
+        raise ValueError(f"GPU memory budget exceeds visible device memory ({total / 1024**3:.2f} GiB); use auto or a smaller budget")
+    torch.cuda.set_per_process_memory_fraction(limit / total, device)
+    torch.cuda.reset_peak_memory_stats(device)
+    print(f"[Memory] PyTorch allocator limit: {limit / 1024**3:.2f} GiB; CUDA context/external allocations are additional")
+    return limit / 1024**3
 
 
 # ============================================================
@@ -114,15 +140,18 @@ def load_lora_library(path):
 
 class SkillLLM:
 
-    def __init__(self, model_name):
+    def __init__(self, model_name, quantization="none"):
         print(f"[Skill] Loading LLM: {model_name}")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        config = quantization_config(TransformersBitsAndBytesConfig, quantization)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=LOCAL_FILES_ONLY)
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto"
+            local_files_only=LOCAL_FILES_ONLY,
+            dtype=torch.bfloat16,
+            quantization_config=config,
+            device_map={"": torch.cuda.current_device()} if config is not None else "auto"
         )
 
 #First, translate the user's input into faithful English without adding,
@@ -317,8 +346,13 @@ class LoRARetriever:
     def __init__(self, library, embedding_model):
         print(f"[Retriever] Loading embedding model: {embedding_model}")
 
-        self.library = library
-        self.encoder = SentenceTransformer(embedding_model)
+        self.library = None
+        self.encoder = SentenceTransformer(embedding_model, local_files_only=LOCAL_FILES_ONLY)
+        self.set_library(library)
+
+    def set_library(self, library):
+        if self.library == library:
+            return
 
         texts = []
 
@@ -330,11 +364,13 @@ class LoRARetriever:
             ])
             texts.append(text)
 
-        self.library_embeddings = self.encoder.encode(
+        embeddings = self.encoder.encode(
             texts,
             convert_to_tensor=True,
             normalize_embeddings=True
         )
+        self.library = library
+        self.library_embeddings = embeddings
 
     def retrieve(
         self,
@@ -343,7 +379,7 @@ class LoRARetriever:
         top_k=2,
         threshold=0.45
     ):
-        if not style_keywords:
+        if not style_keywords or not self.library:
             return []
 
         query = " ; ".join(style_keywords)
@@ -435,26 +471,55 @@ def build_final_prompt(
 
 
 # ============================================================
-# Qwen Image
+# Image Generator
 # ============================================================
 
 class ImageGenerator:
 
-    def __init__(self, model_name):
+    def __init__(self, model_name, quantization="none", offload_mode="model", vae_tiling=False):
         print(f"\n[Image] Loading base model: {model_name}")
-
-        # RTX 5070 Ti / 16GB VRAM：不要整個 pipeline 一次搬進 GPU。
-        # 先以 BF16 載入到 CPU，再由 Accelerate 在推論時逐 component
-        # 搬到 GPU；用完後再 offload 回 CPU，可大幅降低 VRAM 峰值。
-        self.pipe = QwenImage21Pipeline.from_pretrained(
+        if offload_mode not in ("none", "model", "sequential"):
+            raise ValueError("Offload mode must be none, model or sequential")
+        if quantization != "none" and offload_mode == "sequential":
+            raise ValueError("Sequential offload requires unquantized models")
+        components = {}
+        if quantization != "none":
+            config = AutoPipelineForText2Image.load_config(model_name, local_files_only=True)
+            for name, specification in config.items():
+                if name not in ("transformer", "unet") and not name.startswith("text_encoder"):
+                    continue
+                library, class_name = specification
+                if class_name is None:
+                    continue
+                if library not in ("diffusers", "transformers"):
+                    raise ValueError(f"Unsupported model component library: {library}")
+                module = diffusers if library == "diffusers" else transformers
+                config_type = DiffusersBitsAndBytesConfig if library == "diffusers" else TransformersBitsAndBytesConfig
+                components[name] = getattr(module, class_name).from_pretrained(
+                    model_name, subfolder=name, dtype=torch.bfloat16,
+                    quantization_config=quantization_config(config_type, quantization),
+                    device_map={"": torch.cuda.current_device()}, local_files_only=True)
+                if offload_mode == "model":
+                    components[name].to("cpu")
+                    torch.cuda.empty_cache()
+        self.pipe = AutoPipelineForText2Image.from_pretrained(
             model_name,
             dtype=torch.bfloat16,
-            local_files_only=True
+            local_files_only=True,
+            **components
         )
-
-        self.pipe.enable_model_cpu_offload()
-
-        print("[Image] Qwen-Image loaded with CPU offload")
+        if vae_tiling:
+            if not hasattr(getattr(self.pipe, "vae", None), "enable_tiling"):
+                raise ValueError("Selected pipeline does not support VAE tiling; set VAE_TILING=0")
+            self.pipe.vae.enable_tiling()
+        if offload_mode == "model":
+            self.pipe.enable_model_cpu_offload()
+        elif offload_mode == "sequential":
+            self.pipe.enable_sequential_cpu_offload()
+        else:
+            self.pipe.to("cuda")
+        self.loras_loaded = False
+        print(f"[Image] Quantization: {quantization}; offload: {offload_mode}")
 
     def load_loras(self, loras):
         if not loras:
@@ -463,6 +528,7 @@ class ImageGenerator:
 
         adapter_names = []
         adapter_weights = []
+        self.loras_loaded = True
 
         print("\n[LoRA] Loading adapters:")
 
@@ -470,7 +536,8 @@ class ImageGenerator:
             adapter_name = f"style_{i}"
 
             kwargs = {
-                "adapter_name": adapter_name
+                "adapter_name": adapter_name,
+                "local_files_only": LOCAL_FILES_ONLY
             }
 
             if item.get("weight_name"):
@@ -520,6 +587,10 @@ class ImageGenerator:
             device="cuda"
         ).manual_seed(seed)
 
+        guidance = {}
+        if "true_cfg_scale" in inspect.signature(self.pipe.__call__).parameters:
+            guidance["true_cfg_scale"] = float(os.environ.get("TRUE_CFG_SCALE", "1.0"))
+
         # inference_mode 比 no_grad 更適合純推論，可避免建立不必要的
         # autograd 狀態，減少額外記憶體使用。
         with torch.inference_mode():
@@ -529,7 +600,7 @@ class ImageGenerator:
                 height=height,
                 num_inference_steps=steps,
                 generator=generator,
-                true_cfg_scale=1.0
+                **guidance
             )
 
         image = result.images[0]
@@ -538,19 +609,38 @@ class ImageGenerator:
         print(f"\n[Done] Image saved: {output}")
 
     def clear_loras(self):
-        try:
+        if self.loras_loaded:
             self.pipe.unload_lora_weights()
-        except Exception:
-            pass
+            self.loras_loaded = False
 
 
 # ============================================================
 # Main Pipeline
 # ============================================================
 
-def run(args, prompts):
+class ResidentPipeline:
+    def __init__(self, args):
+        self.args = args
+        self.gpu_limit = configure_gpu_memory(args.gpu_memory_gib)
+        self.skill = SkillLLM(args.llm_model, quantization=args.quantization)
+        self.retriever = LoRARetriever(load_lora_library(args.lora_library), args.embed_model)
+        self.image_generator = ImageGenerator(args.image_model, quantization=args.quantization,
+            offload_mode=args.offload_mode, vae_tiling=args.vae_tiling)
+
+    def generate(self, prompt, output_dir):
+        args = argparse.Namespace(**(vars(self.args) | {'output_dir': str(output_dir)}))
+        run(args, [prompt], self)
+
+
+def run(args, prompts, pipeline=None):
     total_start = now()
     timing = {}
+    pipeline = pipeline or ResidentPipeline(args)
+    gpu_limit = pipeline.gpu_limit
+    skill = pipeline.skill
+    retriever = pipeline.retriever
+    image_generator = pipeline.image_generator
+    torch.cuda.reset_peak_memory_stats()
 
     print("=" * 60)
     print("SKILL TEXT-TO-IMAGE PIPELINE")
@@ -564,12 +654,6 @@ def run(args, prompts):
     # --------------------------------------------------------
 
     skill_results = []
-
-    start = now()
-
-    skill = SkillLLM(args.llm_model)
-
-    timing["llm_load"] = now() - start
 
     start = now()
 
@@ -597,41 +681,20 @@ def run(args, prompts):
 
     start = now()
 
-    skill.unload()
-
-    timing["llm_unload"] = now() - start
-
-    gc.collect()
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
     # --------------------------------------------------------
     # LoRA Retriever
     # --------------------------------------------------------
 
     library = load_lora_library(args.lora_library)
+    lora_base_model = args.lora_base_model
+    if lora_base_model == "auto":
+        lora_base_model = Path(args.image_model).name
 
     start = now()
 
-    retriever = LoRARetriever(
-        library,
-        args.embed_model
-    )
+    retriever.set_library(library)
 
-    timing["retriever_load"] = now() - start
-
-    # --------------------------------------------------------
-    # Stage 2 - Image Model Load
-    # --------------------------------------------------------
-
-    start = now()
-
-    image_generator = ImageGenerator(
-        args.image_model
-    )
-
-    timing["image_model_load"] = now() - start
+    timing["retriever_refresh"] = now() - start
 
     all_results = []
 
@@ -694,7 +757,7 @@ def run(args, prompts):
 
         selected_loras = retriever.retrieve(
             style_keywords,
-            "Qwen-Image-2.1",
+            lora_base_model,
             args.top_k,
             args.threshold
         )
@@ -792,8 +855,20 @@ def run(args, prompts):
 
     metadata = {
         "results": all_results,
+        "runtime": {
+            "quantization": args.quantization,
+            "models_resident": True,
+            "offload_mode": args.offload_mode,
+            "vae_tiling": args.vae_tiling,
+            "requested_gpu_memory_gib": args.gpu_memory_gib,
+            "allocator_limit_gib": gpu_limit,
+            "peak_allocated_gib": torch.cuda.max_memory_allocated() / 1024**3,
+            "peak_reserved_gib": torch.cuda.max_memory_reserved() / 1024**3,
+        },
         "generation": {
             "base_model": args.image_model,
+            "pipeline_class": type(image_generator.pipe).__name__,
+            "lora_base_model": lora_base_model,
             "width": args.width,
             "height": args.height,
             "steps": args.steps,
@@ -888,8 +963,32 @@ def load_prompts_from_file(path):
 # Arguments
 # ============================================================
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser()
+
+    def gpu_memory(value):
+        if value == "auto":
+            return value
+        try:
+            amount = float(value)
+        except ValueError:
+            raise argparse.ArgumentTypeError("GPU memory must be auto or a finite positive GiB value") from None
+        if not math.isfinite(amount) or amount <= 0:
+            raise argparse.ArgumentTypeError("GPU memory must be auto or a finite positive GiB value")
+        return amount
+
+    parser.add_argument("--quantization", choices=("none", "8bit", "4bit"),
+                        default=os.environ.get("QUANTIZATION", "4bit"))
+    parser.add_argument("--offload-mode", choices=("none", "model", "sequential"),
+                        default=os.environ.get("OFFLOAD_MODE", "none"))
+    parser.add_argument("--gpu-memory-gib", type=gpu_memory,
+                        default=os.environ.get("GPU_MEMORY_GIB", "auto"),
+                        help="PyTorch allocator budget in GiB; auto uses 90%% of visible GPU memory")
+    parser.add_argument("--vae-tiling", action=argparse.BooleanOptionalAction,
+                        default=os.environ.get("VAE_TILING", "1"),
+                        help="Decode VAE in tiles to reduce large-image memory peaks")
+    parser.add_argument("--lora-base-model", default=os.environ.get("LORA_BASE_MODEL", "auto"),
+                        help="LoRA compatibility key; auto uses the image model directory name")
 
     parser.add_argument(
         "--output-dir",
@@ -904,25 +1003,25 @@ def parse_args():
     parser.add_argument(
         "--width",
         type=int,
-        default=1024
+        default=int(os.environ.get("WIDTH", "1024"))
     )
 
     parser.add_argument(
         "--height",
         type=int,
-        default=1024
+        default=int(os.environ.get("HEIGHT", "1024"))
     )
 
     parser.add_argument(
         "--steps",
         type=int,
-        default=40
+        default=int(os.environ.get("STEPS", "40"))
     )
 
     parser.add_argument(
         "--seed",
         type=int,
-        default=42
+        default=int(os.environ.get("SEED", "42"))
     )
 
     parser.add_argument(
@@ -957,7 +1056,18 @@ def parse_args():
         default=LORA_LIBRARY
     )
 
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if isinstance(args.vae_tiling, str):
+        if args.vae_tiling not in ("0", "1"):
+            parser.error("VAE_TILING must be 0 or 1")
+        args.vae_tiling = args.vae_tiling == "1"
+    if args.quantization not in ("none", "8bit", "4bit"):
+        parser.error("QUANTIZATION must be none, 8bit or 4bit")
+    if args.offload_mode not in ("none", "model", "sequential"):
+        parser.error("OFFLOAD_MODE must be none, model or sequential")
+    if args.quantization != "none" and args.offload_mode == "sequential":
+        parser.error("Sequential offload requires QUANTIZATION=none; quantized models support model or none")
+    return args
 
 
 # ============================================================

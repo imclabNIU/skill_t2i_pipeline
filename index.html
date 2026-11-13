@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>文生圖</title>
+<style>
+:root{color-scheme:light;font-family:"PingFang TC","Noto Sans TC",system-ui,sans-serif;color:#17202a;background:#fff;font-size:16px}
+*{box-sizing:border-box}html,body{height:100%;margin:0}body{overflow:hidden}
+main{height:100dvh;max-width:960px;margin:auto;display:flex;flex-direction:column}
+#jobs{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;padding:28px 24px 8px;scrollbar-gutter:stable}
+article{margin:0 0 36px}.prompt{max-width:82%;margin-left:auto;background:#f4f6f9;border-radius:18px;padding:12px 16px;overflow-wrap:anywhere}
+.prompt p{margin:0;white-space:pre-wrap;line-height:1.7}.prompt time{display:block;text-align:right;font-size:11px;line-height:1.5;color:#667085;margin-top:5px;font-variant-numeric:tabular-nums}
+.reply{margin-top:18px}.progress{font-size:14px;color:#667085;line-height:1.6;margin:0 0 12px}.progress:empty{display:none}
+.images{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.images:empty{display:none}
+figure{margin:0;min-width:0}figcaption{font-size:12px;color:#667085;margin-bottom:7px}img{display:block;width:100%;height:auto;border-radius:10px}
+.composer{flex-shrink:0;background:#fff;padding:10px 24px max(18px,env(safe-area-inset-bottom))}
+#models{font-size:13px;line-height:1.6;padding:10px 0;color:#667085;overflow-wrap:anywhere;max-height:min(28dvh,220px);overflow-y:auto}#models p{margin:0 0 4px}#models ul{margin:0;padding-left:20px}#models[hidden]{display:none}
+form{display:flex;align-items:flex-end;gap:10px}textarea{flex:1;min-width:0;min-height:68px;max-height:180px;resize:vertical;border:1px solid #d8dde5;border-radius:16px;background:#f7f7f8;padding:13px 15px;font:inherit;line-height:1.6;color:inherit}
+textarea::placeholder{color:#667085}button{min-width:68px;min-height:46px;border:0;border-radius:12px;background:#202b36;color:#fff;font:inherit;padding:10px 17px;cursor:pointer;margin-bottom:2px}button:disabled{opacity:.5;cursor:wait}
+textarea:focus-visible,button:focus-visible{outline:2px solid #667085;outline-offset:3px}
+#status{min-height:18px;margin:7px 0 0;font-size:12px;color:#667085;line-height:1.5}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+@media(max-width:600px){#jobs{padding:20px 14px 0}.composer{padding:8px 14px max(12px,env(safe-area-inset-bottom))}.prompt{max-width:90%}.images{grid-template-columns:1fr;gap:18px}article{margin-bottom:28px}}
+</style>
+</head>
+<body>
+<main>
+  <div id="jobs" aria-label="生成歷史紀錄"></div>
+  <div class="composer">
+    <div id="models" role="status" hidden></div>
+    <form id="form">
+      <label class="sr-only" for="prompt">圖片描述</label>
+      <textarea id="prompt" rows="2" maxlength="4000" placeholder="描述想生成的畫面…" required></textarea>
+      <button id="submit" type="submit">送出</button>
+    </form>
+    <p id="status" role="status"></p>
+  </div>
+</main>
+<script>
+const form=document.querySelector('#form'), input=document.querySelector('#prompt'), button=document.querySelector('#submit');
+const status=document.querySelector('#status'), jobs=document.querySelector('#jobs'), models=document.querySelector('#models');
+const cards=new Map();
+let historyBusy=false, followTail=true, historyRevision=0;
+
+jobs.addEventListener('scroll',()=>{followTail=jobs.scrollHeight-jobs.scrollTop-jobs.clientHeight<120});
+function scrollToEnd(){jobs.scrollTop=jobs.scrollHeight}
+function renderJob(job){
+  let card=cards.get(job.job);
+  if(!card){
+    const article=document.createElement('article'), bubble=document.createElement('div'), prompt=document.createElement('p');
+    const time=document.createElement('time'), reply=document.createElement('div'), progress=document.createElement('p'), images=document.createElement('div');
+    article.dataset.job=job.job; bubble.className='prompt'; reply.className='reply'; progress.className='progress'; images.className='images';
+    progress.setAttribute('role','status'); bubble.append(prompt,time); reply.append(progress,images); article.append(bubble,reply); jobs.append(article);
+    card={article,prompt,time,progress,images}; cards.set(job.job,card);
+  }
+  card.prompt.textContent=job.prompt;
+  card.time.dateTime=job.createdAt;
+  card.time.textContent=new Date(job.createdAt).toLocaleString('zh-TW',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+  if(job.status==='queued') card.progress.textContent=`排隊中（目前第 ${job.queuePosition} 位）`;
+  else if(job.status==='running') card.progress.textContent='生成中…';
+  else if(job.status==='submitting') card.progress.textContent=`派送結果待確認，請保留工作 ID 並洽管理員：${job.job}`;
+  else if(job.status==='failed') card.progress.textContent=job.error||'生成失敗，請重新送出。';
+  else if(job.status==='completed'){
+    card.progress.textContent='';
+    if(!card.images.children.length){
+      for(const [label,file] of [['原始圖片','result_01_original.png'],['增強圖片','result_01_enhanced.png']]){
+        const figure=document.createElement('figure'), caption=document.createElement('figcaption'), image=document.createElement('img');
+        caption.textContent=label; image.alt=label; image.loading='lazy';image.decoding='async';image.width=1024;image.height=1024;image.src=`api/jobs/${job.job}/${file}`;
+        image.addEventListener('load',()=>{image.width=image.naturalWidth;image.height=image.naturalHeight;if(followTail) scrollToEnd()});
+        figure.append(caption,image); card.images.append(figure);
+      }
+    }
+  }
+}
+async function refreshHistory(){
+  if(historyBusy) return;
+  historyBusy=true;
+  const revision=historyRevision;
+  try{
+    const response=await fetch('api/jobs');
+    if(!response.ok) throw new Error(`無法載入歷史紀錄（HTTP ${response.status}），稍後會重試。`);
+    const data=await response.json();
+    if(revision!==historyRevision) return;
+    const tail=followTail;
+    const visible=new Set(data.jobs.map(job=>job.job));
+    for(const [id,card] of cards){if(!visible.has(id)){card.article.remove();cards.delete(id)}}
+    for(const job of data.jobs) renderJob(job);
+    if(tail) scrollToEnd();
+  }catch(error){status.textContent=error.message}
+  finally{historyBusy=false}
+}
+async function refreshModels(){
+  try{
+    const response=await fetch('api/models');
+    if(!response.ok) throw new Error(`無法取得模型狀態（HTTP ${response.status}）`);
+    const data=await response.json(), workers=data.workers, ready=workers.some(worker=>worker.state==='ready');
+    models.replaceChildren(); models.hidden=ready;
+    if(ready) return;
+    const heading=document.createElement('p');
+    heading.textContent=workers.some(worker=>worker.state==='loading')?'模型載入中，送出的描述會先排隊。':'等待模型就緒，送出的描述會先排隊。';
+    models.append(heading);
+    const list=document.createElement('ul'), seen=new Set();
+    for(const worker of workers){
+      for(const item of worker.missing||[]){
+        const text=`${item.model}：${item.path}（${item.reason}）`;
+        if(seen.has(text)) continue;
+        seen.add(text); const line=document.createElement('li'); line.textContent=text; list.append(line);
+      }
+      if(worker.state==='error'&&worker.error){const line=document.createElement('li');line.textContent=worker.error;list.append(line)}
+    }
+    if(list.children.length) models.append(list);
+  }catch(error){models.hidden=false;models.textContent=error.message}
+}
+form.addEventListener('submit',async event=>{
+  event.preventDefault();
+  if(button.disabled||!input.value.trim()) return;
+  const prompt=input.value;
+  button.disabled=true; status.textContent='送出中…';
+  try{
+    const response=await fetch('api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
+    const job=await response.json().catch(()=>({}));
+    if(!response.ok) throw new Error(job.error||job.message||`送出失敗（HTTP ${response.status}）`);
+    historyRevision++;
+    if(input.value===prompt) input.value='';
+    renderJob({...job,prompt,status:'queued',queuePosition:job.queuePosition||1});
+    followTail=true;scrollToEnd();input.focus();status.textContent='';
+    await refreshHistory();
+  }catch(error){status.textContent=error.message}
+  finally{button.disabled=false}
+});
+input.addEventListener('keydown',event=>{
+  if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing){event.preventDefault();form.requestSubmit()}
+});
+refreshHistory();refreshModels();
+setInterval(refreshHistory,3000);setInterval(refreshModels,5000);
+</script>
+</body>
+</html>

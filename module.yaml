@@ -1,0 +1,84 @@
+apiVersion: platform.module/v1
+kind: Module
+metadata:
+  id: skill-text-to-image
+  name: Skill Text to Image
+  version: 1.0.0
+  description: Skill-enhanced text to image with a persistent FIFO queue and scalable GPU workers.
+compose:
+  file: compose.yaml
+services:
+  coordinator:
+    role: ui-api
+    imageSource: package
+    workloadType: Deployment
+    replicas: 1
+    maxReplicas: 1
+    fsGroup: 10001
+    architectures: [arm64, amd64]
+    resources: {cpu: "1", memory: 512Mi}
+    healthCheck: {path: /readyz, port: 7860}
+    environment:
+      ROLE: coordinator
+      MODE: platform
+      PORT: "7860"
+      PATH_BASE: /
+      OUTPUT_DIR: /data/output
+      WORKER_URL_TEMPLATE: http://ap-worker-{index}.ap-worker:8188
+    replicaEnvironment: {WORKER_COUNT: worker}
+    storage:
+      - {claim: skill-output, mountPath: /data/output, create: true, storageClass: rwx-storage, size: 30Gi, accessMode: ReadWriteMany}
+  worker:
+    role: gpu-worker
+    imageSource: package
+    workloadType: StatefulSet
+    runtimeClassName: nvidia
+    fsGroup: 10001
+    replicas: 2
+    architectures: [arm64, amd64]
+    resources: {cpu: "4", memory: 32Gi, gpu: 1}
+    healthCheck: {path: /readyz, port: 8188}
+    environment:
+      ROLE: worker
+      MODE: platform
+      PORT: "8188"
+      OUTPUT_DIR: /data/output
+      HF_HOME: /data/cache
+      HF_HUB_OFFLINE: "1"
+      IMAGE_MODEL: /data/models/base-models/Qwen-Image-2.1
+      LLM_MODEL: /data/models/llm/Qwen2.5-1.5B-Instruct
+      EMBED_MODEL: /data/models/embedding/paraphrase-multilingual-MiniLM-L12-v2
+      LORA_LIBRARY: /app/lora_library.json
+      LORA_BASE_MODEL: auto
+      WIDTH: "1024"
+      HEIGHT: "1024"
+      STEPS: "40"
+      SEED: "42"
+      MAX_LORAS: "2"
+      SIMILARITY_THRESHOLD: "0.45"
+      DEFAULT_LORA_WEIGHT: "0.3"
+      TRUE_CFG_SCALE: "1.0"
+      QUANTIZATION: 4bit
+      OFFLOAD_MODE: none
+      GPU_MEMORY_GIB: auto
+      VAE_TILING: "1"
+    storage:
+      - {claim: skill-models, mountPath: /data/models, readOnly: true, create: true, storageClass: rwx-storage, size: 100Gi, accessMode: ReadWriteMany}
+      - {claim: skill-output, mountPath: /data/output, create: true, storageClass: rwx-storage, size: 30Gi, accessMode: ReadWriteMany}
+      - {claim: skill-cache, mountPath: /data/cache, create: true, storageClass: rwx-storage, size: 30Gi, accessMode: ReadWriteMany}
+ui: {service: coordinator, port: 7860, path: /}
+api: {service: coordinator, port: 7860, path: /api}
+identityIntegration: gateway
+usageReporting:
+  enabled: true
+  mode: callback
+  unit: successful-generation
+  usageMode: delta
+  billableOperations:
+    - {method: POST, path: /api/jobs}
+compatibility:
+  compatibleWith: []
+  replicasShareData: true
+configuration:
+  environment: [IMAGE_MODEL, LLM_MODEL, EMBED_MODEL, LORA_LIBRARY, LORA_BASE_MODEL, WIDTH, HEIGHT, STEPS, SEED, MAX_LORAS, SIMILARITY_THRESHOLD, DEFAULT_LORA_WEIGHT, TRUE_CFG_SCALE, QUANTIZATION, OFFLOAD_MODE, GPU_MEMORY_GIB, VAE_TILING]
+  storage: [models, output, cache]

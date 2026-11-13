@@ -1,0 +1,19 @@
+# 模型、產物
+models/
+results/
+
+# 本機設定，保留範例
+.env
+.env.*
+!.env.example
+lora_library.local.json
+
+# Python 環境與快取
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# 本機紀錄
+*.log
+.DS_Store
